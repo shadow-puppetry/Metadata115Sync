@@ -3,13 +3,13 @@
     "name": "Metadata115Sync",
     "description": "MoviePilot V2：把本地已有、115没有的元数据按目录映射单向补齐到115。",
     "labels": "元数据同步,115,云盘",
-    "version": "1.2.0",
+    "version": "1.3.0",
     "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot-Frontend/refs/heads/v2/src/assets/images/misc/u115.png",
     "author": "shadow-puppetry",
     "level": 1,
     "system_version": ">=2.0.0",
     "history": {
-      "v1.2.0": "重做配置页和执行页，增加立即同步、扫描预览、详细执行日志、统计结果。",
+      "v1.3.0": "重做配置页和执行页，增加立即同步、扫描预览、详细执行日志、统计结果。",
       "v1.1.0": "优化115目录缓存、失败统计和映射处理。",
       "v1.0.0": "首个V2版本。"
     }

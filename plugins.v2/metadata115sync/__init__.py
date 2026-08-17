@@ -18,7 +18,7 @@ class Metadata115Sync(_PluginBase):
     plugin_name = "Metadata115Sync"
     plugin_desc = "本地已有、115没有的元数据，按目录映射单向上传到115。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Frontend/refs/heads/v2/src/assets/images/misc/u115.png"
-    plugin_version = "1.2.0"
+    plugin_version = "1.3.0"
     plugin_author = "shadow-puppetry"
     plugin_label = "115元数据同步"
     plugin_config_prefix = "metadata115sync_"
