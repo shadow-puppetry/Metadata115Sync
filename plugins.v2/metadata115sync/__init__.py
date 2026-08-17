@@ -13,14 +13,14 @@ from app.plugins import _PluginBase
 
 
 class Metadata115Sync(_PluginBase):
-    """将 NAS 本地已有的元数据单向补齐到 MoviePilot 已配置的 115。"""
+    """把本地已有元数据单向补齐到 MoviePilot 已配置的 115。"""
 
     plugin_name = "Metadata115Sync"
-    plugin_desc = "仅把本地已有、115 中不存在的元数据上传到 MP 已配置的 115，不使用 TMDB。"
-    plugin_icon = "Moviepilot_A.png"
-    plugin_version = "1.0.0"
-    plugin_author = "OpenAI"
-    plugin_label = "元数据同步"
+    plugin_desc = "本地已有、115没有的元数据，按目录映射单向上传到115。"
+    plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Frontend/refs/heads/v2/src/assets/images/misc/u115.png"
+    plugin_version = "1.2.0"
+    plugin_author = "shadow-puppetry"
+    plugin_label = "115元数据同步"
     plugin_config_prefix = "metadata115sync_"
     plugin_order = 50
     auth_level = 1
@@ -31,14 +31,19 @@ class Metadata115Sync(_PluginBase):
     _max_size_mb = 20
     _parent_metadata = False
     _interval_minutes = 60
-    _last_result = "尚未执行同步"
+
+    _running = False
     _lock = threading.Lock()
+    _stats: dict[str, int] = {}
+    _logs: list[str] = []
+    _last_status = "尚未执行"
+    _last_error = ""
 
     def init_plugin(self, config: dict | None = None) -> None:
         config = config or {}
         self._enabled = bool(config.get("enabled", False))
         self._mappings = str(config.get("mappings") or "").strip()
-        self._extensions = str(config.get("extensions") or self._extensions)
+        self._extensions = str(config.get("extensions") or ".nfo,.jpg,.jpeg,.png,.webp,.xml")
         try:
             self._max_size_mb = max(1, int(config.get("max_size_mb") or 20))
         except (TypeError, ValueError):
@@ -48,7 +53,11 @@ class Metadata115Sync(_PluginBase):
             self._interval_minutes = max(5, int(config.get("interval_minutes") or 60))
         except (TypeError, ValueError):
             self._interval_minutes = 60
-        self._last_result = "已加载配置"
+
+        self._logs = []
+        self._stats = {}
+        self._last_status = "配置已加载"
+        self._last_error = ""
 
     def get_state(self) -> bool:
         return self._enabled
@@ -58,18 +67,32 @@ class Metadata115Sync(_PluginBase):
         return []
 
     def get_api(self) -> list[dict[str, Any]]:
-        return [{
-            "path": "/sync",
-            "endpoint": self.sync_api,
-            "methods": ["POST"],
-            "summary": "立即同步本地元数据到115",
-            "description": "执行一次 NAS → 115 单向元数据补齐。",
-        }]
+        return [
+            {
+                "path": "/sync",
+                "endpoint": self.sync_api,
+                "methods": ["POST"],
+                "summary": "立即同步",
+                "description": "立即执行一次本地元数据到115的单向补齐。",
+            },
+            {
+                "path": "/preview",
+                "endpoint": self.preview_api,
+                "methods": ["GET"],
+                "summary": "扫描预览",
+                "description": "只扫描本地文件，不访问或修改115。",
+            },
+        ]
 
     def sync_api(self):
         if not self._enabled:
-            return {"success": False, "message": "插件未启用"}
-        return {"success": True, "result": self.sync()}
+            return {"success": False, "message": "插件未启用，请先打开“启用元数据同步”。"}
+        result = self.sync()
+        return {"success": True, "result": result}
+
+    def preview_api(self):
+        result = self.preview()
+        return {"success": True, "result": result}
 
     def get_form(self) -> tuple[list[dict], dict[str, Any]]:
         return [
@@ -81,7 +104,7 @@ class Metadata115Sync(_PluginBase):
                         "props": {
                             "type": "info",
                             "variant": "tonal",
-                            "text": "使用 MoviePilot 已配置的 115 存储，仅执行本地 → 115 单向补齐；115 已存在的文件会跳过。",
+                            "text": "只做本地 → 115 单向补齐：本地有、115没有才上传；115已有则跳过。不使用TMDB，不上传视频，不删除或覆盖115文件。",
                         },
                     },
                     {
@@ -93,9 +116,9 @@ class Metadata115Sync(_PluginBase):
                         "props": {
                             "model": "mappings",
                             "label": "本地目录 → 115目录映射",
-                            "rows": 5,
-                            "placeholder": "/media/movies=/电影\n/media/tv=/电视剧",
-                            "hint": "每行一个映射；左侧必须是 MoviePilot 容器内可访问的本地路径。",
+                            "rows": 4,
+                            "placeholder": "/strm=/影视库/媒体目录",
+                            "hint": "每行一个映射。例：/strm=/影视库/媒体目录；左侧必须是MP容器内实际可访问的本地目录。",
                         },
                     },
                     {
@@ -103,14 +126,14 @@ class Metadata115Sync(_PluginBase):
                         "props": {
                             "model": "extensions",
                             "label": "元数据扩展名",
-                            "hint": "默认：.nfo,.jpg,.jpeg,.png,.webp,.xml",
+                            "hint": "逗号分隔，例如 .nfo,.jpg,.jpeg,.png,.webp,.xml",
                         },
                     },
                     {
                         "component": "VTextField",
                         "props": {
                             "model": "max_size_mb",
-                            "label": "元数据大小上限（MB）",
+                            "label": "单个元数据大小上限（MB）",
                             "type": "number",
                             "min": 1,
                             "max": 1024,
@@ -118,7 +141,10 @@ class Metadata115Sync(_PluginBase):
                     },
                     {
                         "component": "VSwitch",
-                        "props": {"model": "parent_metadata", "label": "父目录元数据同步"},
+                        "props": {
+                            "model": "parent_metadata",
+                            "label": "同步父目录元数据",
+                        },
                     },
                     {
                         "component": "VTextField",
@@ -142,9 +168,89 @@ class Metadata115Sync(_PluginBase):
         }
 
     def get_page(self) -> list[dict]:
+        stats = self._stats or {
+            "scanned": 0,
+            "uploaded": 0,
+            "skipped": 0,
+            "failed": 0,
+            "ignored": 0,
+        }
+        status = (
+            f"状态：{'运行中' if self._running else self._last_status}\n"
+            f"扫描：{stats.get('scanned', 0)}  |  "
+            f"上传：{stats.get('uploaded', 0)}  |  "
+            f"已存在跳过：{stats.get('skipped', 0)}  |  "
+            f"失败：{stats.get('failed', 0)}  |  "
+            f"忽略：{stats.get('ignored', 0)}"
+        )
+        logs = "\n".join(self._logs[-80:]) or "暂无执行日志。"
+
         return [
-            {"component": "VAlert", "props": {"type": "info", "variant": "tonal", "text": self._last_result}},
-            {"component": "VAlert", "props": {"type": "secondary", "variant": "tonal", "text": "不会使用 TMDB，不上传视频，不覆盖已有文件，不删除 115 文件。"}},
+            {
+                "component": "VAlert",
+                "props": {
+                    "type": "info" if not self._running else "warning",
+                    "variant": "tonal",
+                    "text": status,
+                },
+            },
+            {
+                "component": "VRow",
+                "content": [
+                    {
+                        "component": "VCol",
+                        "props": {"cols": 6},
+                        "content": [
+                            {
+                                "component": "VBtn",
+                                "props": {
+                                    "color": "primary",
+                                    "block": True,
+                                    "disabled": self._running,
+                                    "text": "立即同步",
+                                },
+                                "events": {
+                                    "click": {
+                                        "api": "plugin/Metadata115Sync/sync",
+                                        "method": "post",
+                                    }
+                                },
+                            }
+                        ],
+                    },
+                    {
+                        "component": "VCol",
+                        "props": {"cols": 6},
+                        "content": [
+                            {
+                                "component": "VBtn",
+                                "props": {
+                                    "variant": "outlined",
+                                    "block": True,
+                                    "disabled": self._running,
+                                    "text": "扫描预览（不上传）",
+                                },
+                                "events": {
+                                    "click": {
+                                        "api": "plugin/Metadata115Sync/preview",
+                                        "method": "get",
+                                    }
+                                },
+                            }
+                        ],
+                    },
+                ],
+            },
+            {
+                "component": "VTextarea",
+                "props": {
+                    "model": "logs",
+                    "label": "最近执行日志",
+                    "rows": 18,
+                    "readonly": True,
+                    "model-value": logs,
+                },
+            },
         ]
 
     def get_service(self) -> list[dict]:
@@ -162,8 +268,10 @@ class Metadata115Sync(_PluginBase):
         self._enabled = False
 
     @staticmethod
-    def _normalize_remote_path(path: str) -> str:
+    def _normalize_remote(path: str) -> str:
         path = path.replace("\\", "/").strip()
+        if not path:
+            return "/"
         if not path.startswith("/"):
             path = "/" + path
         while "//" in path:
@@ -171,7 +279,7 @@ class Metadata115Sync(_PluginBase):
         return path.rstrip("/") or "/"
 
     def _extensions_set(self) -> set[str]:
-        result: set[str] = set()
+        result = set()
         for item in self._extensions.split(","):
             item = item.strip().lower()
             if item:
@@ -179,16 +287,29 @@ class Metadata115Sync(_PluginBase):
         return result
 
     def _parse_mappings(self) -> list[tuple[Path, str]]:
-        result: list[tuple[Path, str]] = []
+        result = []
         for raw in self._mappings.splitlines():
             line = raw.strip()
             if not line or line.startswith("#") or "=" not in line:
                 continue
             local, remote = line.split("=", 1)
-            local, remote = local.strip(), remote.strip()
-            if local and remote:
-                result.append((Path(local).expanduser().resolve(), self._normalize_remote_path(remote)))
+            local = local.strip()
+            remote = remote.strip()
+            if not local or not remote:
+                continue
+            result.append((Path(local).expanduser().resolve(), self._normalize_remote(remote)))
         return result
+
+    def _log(self, message: str, level: str = "info") -> None:
+        line = message
+        self._logs.append(line)
+        self._logs = self._logs[-200:]
+        if level == "error":
+            logger.error(f"Metadata115Sync：{message}")
+        elif level == "warning":
+            logger.warning(f"Metadata115Sync：{message}")
+        else:
+            logger.info(f"Metadata115Sync：{message}")
 
     def _iter_metadata(self, root: Path):
         if not root.is_dir():
@@ -196,32 +317,48 @@ class Metadata115Sync(_PluginBase):
         extensions = self._extensions_set()
         limit = self._max_size_mb * 1024 * 1024
         for current, _, files in os.walk(root):
-            for name in files:
+            for name in sorted(files):
                 path = Path(current) / name
-                if path.suffix.lower() not in extensions:
-                    continue
                 try:
-                    if path.stat().st_size <= limit:
-                        yield path
-                except OSError:
-                    continue
+                    if path.suffix.lower() not in extensions:
+                        continue
+                    size = path.stat().st_size
+                    if size > limit:
+                        self._stats["ignored"] += 1
+                        self._log(f"忽略超大文件：{path} ({size / 1024 / 1024:.1f} MB)")
+                        continue
+                    yield path
+                except OSError as err:
+                    self._stats["failed"] += 1
+                    self._log(f"读取文件失败：{path}：{err}", "error")
 
     @staticmethod
     def _remote_item(chain: StorageChain, path: str):
-        # V2 115 存储类型由宿主的 u115 模块提供。
         return chain.get_file_item(storage="u115", path=Path(path))
 
-    def _upload_one(self, local_file: Path, local_root: Path, remote_root: str) -> str:
+    def _upload_one(
+        self,
+        chain: StorageChain,
+        local_file: Path,
+        local_root: Path,
+        remote_root: str,
+        folder_cache: dict[str, Any],
+    ) -> str:
         relative = local_file.relative_to(local_root).as_posix()
-        remote_path = self._normalize_remote_path(f"{remote_root}/{relative}")
-        chain = StorageChain()
+        remote_path = self._normalize_remote(f"{remote_root}/{relative}")
 
-        if self._remote_item(chain, remote_path):
+        existing = self._remote_item(chain, remote_path)
+        if existing:
+            self._log(f"跳过（115已有）：{remote_path}")
             return "skipped"
 
-        parent = chain.get_folder(storage="u115", path=Path(remote_path).parent)
-        if not parent:
-            raise RuntimeError(f"无法获取或创建 115 目录：{Path(remote_path).parent}")
+        parent_path = self._normalize_remote(str(Path(remote_path).parent))
+        parent = folder_cache.get(parent_path)
+        if parent is None:
+            parent = chain.get_folder(storage="u115", path=Path(parent_path))
+            if not parent:
+                raise RuntimeError(f"无法获取/创建115目录：{parent_path}")
+            folder_cache[parent_path] = parent
 
         uploaded = chain.upload_file(
             fileitem=parent,
@@ -229,64 +366,98 @@ class Metadata115Sync(_PluginBase):
             new_name=local_file.name,
         )
         if not uploaded:
-            raise RuntimeError(f"115 上传失败：{local_file}")
+            raise RuntimeError("MoviePilot返回上传失败")
+
+        self._log(f"上传成功：{local_file} → {remote_path}")
         return "uploaded"
 
+    def preview(self) -> dict[str, Any]:
+        self._stats = {"scanned": 0, "uploaded": 0, "skipped": 0, "failed": 0, "ignored": 0}
+        self._logs = []
+        mappings = self._parse_mappings()
+        self._log("开始扫描预览（不会访问或修改115）")
+
+        if not mappings:
+            self._last_status = "配置错误：没有有效的目录映射"
+            self._log("没有有效映射，请填写例如：/strm=/影视库/媒体目录", "error")
+            return {"ok": False, **self._stats}
+
+        for local_root, remote_root in mappings:
+            self._log(f"检查映射：{local_root} → {remote_root}")
+            if not local_root.is_dir():
+                self._stats["failed"] += 1
+                self._log(f"本地目录不存在：{local_root}", "error")
+                continue
+            for path in self._iter_metadata(local_root):
+                self._stats["scanned"] += 1
+                self._log(f"发现元数据：{path}")
+
+        self._last_status = "扫描预览完成"
+        self._log(
+            f"扫描完成：发现 {self._stats['scanned']} 个元数据文件，"
+            f"忽略 {self._stats['ignored']} 个，失败 {self._stats['failed']} 个"
+        )
+        return {"ok": True, **self._stats}
+
     def sync(self) -> dict[str, int]:
-        stats = {"scanned": 0, "uploaded": 0, "skipped": 0, "failed": 0}
         if not self._enabled:
-            return stats
+            self._last_status = "插件未启用"
+            self._log("插件未启用，未执行同步", "warning")
+            return {"scanned": 0, "uploaded": 0, "skipped": 0, "failed": 0, "ignored": 0}
+
         if not self._lock.acquire(blocking=False):
-            self._last_result = "同步正在运行，本次跳过"
-            return stats
+            self._log("已有同步任务正在运行，本次跳过", "warning")
+            return self._stats
+
+        self._running = True
+        self._stats = {"scanned": 0, "uploaded": 0, "skipped": 0, "failed": 0, "ignored": 0}
+        self._logs = []
         try:
             mappings = self._parse_mappings()
+            self._log("开始执行本地 → 115 元数据同步")
+            self._log(f"扩展名：{', '.join(sorted(self._extensions_set()))}")
+            self._log(f"单文件大小上限：{self._max_size_mb} MB")
+
             if not mappings:
-                self._last_result = "请先配置本地目录 → 115目录映射。"
-                return stats
+                self._last_status = "配置错误：没有有效的目录映射"
+                self._log("没有有效映射，请填写例如：/strm=/影视库/媒体目录", "error")
+                return self._stats
+
+            chain = StorageChain()
+            folder_cache: dict[str, Any] = {}
 
             for local_root, remote_root in mappings:
+                self._log(f"处理映射：{local_root} → {remote_root}")
                 if not local_root.is_dir():
-                    logger.warning(f"Metadata115Sync：本地目录不存在，跳过：{local_root}")
+                    self._stats["failed"] += 1
+                    self._log(f"本地目录不存在：{local_root}", "error")
                     continue
 
                 for local_file in self._iter_metadata(local_root):
-                    stats["scanned"] += 1
+                    self._stats["scanned"] += 1
                     try:
-                        result = self._upload_one(local_file, local_root, remote_root)
-                        stats[result] += 1
+                        result = self._upload_one(
+                            chain, local_file, local_root, remote_root, folder_cache
+                        )
+                        self._stats[result] += 1
                     except Exception as err:
-                        stats["failed"] += 1
-                        logger.exception(f"Metadata115Sync：处理失败 {local_file}: {err}")
+                        self._stats["failed"] += 1
+                        self._log(f"失败：{local_file}：{err}", "error")
 
-                if self._parent_metadata:
-                    self._sync_parent_metadata(local_root, remote_root, stats)
-
-            self._last_result = (
-                f"同步完成：扫描 {stats['scanned']}，上传 {stats['uploaded']}，"
-                f"已存在跳过 {stats['skipped']}，失败 {stats['failed']}"
+            self._last_status = (
+                f"同步完成：扫描 {self._stats['scanned']}，"
+                f"上传 {self._stats['uploaded']}，"
+                f"跳过 {self._stats['skipped']}，"
+                f"失败 {self._stats['failed']}，"
+                f"忽略 {self._stats['ignored']}"
             )
-            return stats
+            self._log(self._last_status)
+            return self._stats
+        except Exception as err:
+            self._last_error = str(err)
+            self._last_status = "同步异常"
+            self._log(f"同步异常：{err}", "error")
+            return self._stats
         finally:
+            self._running = False
             self._lock.release()
-
-    def _sync_parent_metadata(self, local_root: Path, remote_root: str, stats: dict[str, int]) -> None:
-        parent = local_root.parent
-        if not parent.is_dir():
-            return
-        extensions = self._extensions_set()
-        limit = self._max_size_mb * 1024 * 1024
-        remote_parent = self._normalize_remote_path(str(Path(remote_root).parent))
-
-        for path in parent.iterdir():
-            if not path.is_file() or path.suffix.lower() not in extensions:
-                continue
-            try:
-                if path.stat().st_size > limit:
-                    continue
-                stats["scanned"] += 1
-                result = self._upload_one(path, parent, remote_parent)
-                stats[result] += 1
-            except Exception as err:
-                stats["failed"] += 1
-                logger.exception(f"Metadata115Sync：父目录元数据失败 {path}: {err}")
