@@ -1,15 +1,15 @@
 {
   "Metadata115Sync": {
     "name": "Metadata115Sync",
-    "description": "本地已有、115没有的元数据按目录映射单向上传到115，不使用TMDB。",
+    "description": "只上传本地已有且115不存在的元数据，不使用TMDB。",
     "labels": "元数据同步,115",
-    "version": "2.1.0",
+    "version": "2.2.0",
     "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/u115.png",
     "author": "shadow-puppetry",
     "level": 1,
-    "system_version": ">=2.12.0,<3",
+    "system_version": ">=2.0.0,<3",
     "history": {
-      "v2.1.0": "重做V2详情页和执行反馈，增加立即同步、扫描预览、统计和日志。"
+      "v2.2.0": "按官方V2详情页events API模式重做操作入口。"
     }
   }
 }
