@@ -1,12 +1,16 @@
-import ast, json
+import ast
+import json
+from pathlib import Path
 
 def test_contract():
-    p='plugins.v2/metadata115sync/__init__.py'
-    s=open(p,encoding='utf-8').read()
-    ast.parse(s)
-    assert 'plugin_version = "2.3.0"' in s
-    assert '"model": "onlyonce"' in s
-    assert 'def init_plugin' in s and 'self._onlyonce' in s
-    assert 'def get_form' in s and 'def get_page' in s
-    meta=json.load(open('package.v2.json',encoding='utf-8'))
-    assert meta['Metadata115Sync']['version']=='2.3.0'
+    code = Path("plugins.v2/metadata115sync/__init__.py").read_text(encoding="utf-8")
+    ast.parse(code)
+    assert 'plugin_version = "2.4.0"' in code
+    assert '"model": "onlyonce"' in code
+    assert 'def get_service' in code
+    assert '"trigger": "interval"' in code
+    assert '"path": "/stop"' in code
+    assert 'chain.list_files' in code
+    assert 'file_cache' in code
+    meta = json.loads(Path("package.v2.json").read_text(encoding="utf-8"))
+    assert meta["Metadata115Sync"]["version"] == "2.4.0"
