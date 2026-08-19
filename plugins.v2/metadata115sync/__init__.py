@@ -18,7 +18,7 @@ class Metadata115Sync(_PluginBase):
     plugin_name = "Metadata115Sync"
     plugin_desc = "本地元数据单向同步到115，不使用TMDB。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/u115.png"
-    plugin_version = "2.5.0"
+    plugin_version = "2.6.0"
     plugin_author = "shadow-puppetry"
     author_url = ""
     plugin_config_prefix = "metadata115sync_"
@@ -223,19 +223,31 @@ class Metadata115Sync(_PluginBase):
     def get_page(self) -> List[dict]:
         status = self.get_data("status") or {}
         state = status.get("state", "空闲")
+        current = int(status.get("current", 0) or 0)
+        total = int(status.get("total", 0) or 0)
+        percent = int(status.get("percent", 0) or 0)
+        current_file = status.get("current_file", "")
 
         summary = [
             f"状态：{state}",
+            f"进度：{current}/{total}（{percent}%）" if total else "进度：等待扫描",
             f"扫描文件：{status.get('scanned', 0)}",
             f"115已有：{status.get('existing', 0)}",
             f"待同步：{status.get('pending', 0)}",
             f"已上传：{status.get('uploaded', 0)}",
-            f"跳过：{status.get('skipped', 0)}",
+            f"缓存跳过：{status.get('skipped', 0)}",
             f"失败：{status.get('failed', 0)}",
         ]
-
+        if current_file:
+            summary.append(f"当前：{current_file}")
         if status.get("message"):
             summary.append(f"信息：{status['message']}")
+
+        progress_props = {
+            "model-value": percent,
+            "height": 8,
+            "rounded": True,
+        }
 
         return [{
             "component": "div",
@@ -243,12 +255,10 @@ class Metadata115Sync(_PluginBase):
             "content": [
                 {
                     "component": "VAlert",
-                    "props": {
-                        "type": "info",
-                        "variant": "tonal",
-                    },
+                    "props": {"type": "info", "variant": "tonal"},
                     "text": "　".join(summary),
                 },
+                {"component": "VProgressLinear", "props": progress_props},
                 {
                     "component": "div",
                     "props": {"class": "d-flex flex-wrap gap-2"},
@@ -257,37 +267,31 @@ class Metadata115Sync(_PluginBase):
                             "component": "VBtn",
                             "props": {"color": "primary"},
                             "text": "立即同步",
-                            "events": {
-                                "click": {
-                                    "api": "plugin/Metadata115Sync/sync",
-                                    "method": "post",
-                                    "params": {"apikey": settings.API_TOKEN},
-                                }
-                            },
+                            "events": {"click": {
+                                "api": "plugin/Metadata115Sync/sync",
+                                "method": "post",
+                                "params": {"apikey": settings.API_TOKEN},
+                            }},
                         },
                         {
                             "component": "VBtn",
                             "props": {"variant": "tonal"},
                             "text": "扫描预览",
-                            "events": {
-                                "click": {
-                                    "api": "plugin/Metadata115Sync/scan",
-                                    "method": "get",
-                                    "params": {"apikey": settings.API_TOKEN},
-                                }
-                            },
+                            "events": {"click": {
+                                "api": "plugin/Metadata115Sync/scan",
+                                "method": "get",
+                                "params": {"apikey": settings.API_TOKEN},
+                            }},
                         },
                         {
                             "component": "VBtn",
                             "props": {"color": "error", "variant": "tonal"},
                             "text": "停止同步",
-                            "events": {
-                                "click": {
-                                    "api": "plugin/Metadata115Sync/stop",
-                                    "method": "post",
-                                    "params": {"apikey": settings.API_TOKEN},
-                                }
-                            },
+                            "events": {"click": {
+                                "api": "plugin/Metadata115Sync/stop",
+                                "method": "post",
+                                "params": {"apikey": settings.API_TOKEN},
+                            }},
                         },
                     ],
                 },
@@ -301,6 +305,17 @@ class Metadata115Sync(_PluginBase):
         status = self.get_data("status") or {}
         status.update(kwargs)
         self.save_data("status", status)
+
+    def _set_progress(self, current: int, total: int, *, state: str, current_file: str = "", **kwargs):
+        percent = int(current * 100 / total) if total else 0
+        self._set_status(
+            current=current,
+            total=total,
+            percent=percent,
+            current_file=current_file,
+            state=state,
+            **kwargs,
+        )
 
     def _check_api_key(self, apikey: str) -> bool:
         return apikey == settings.API_TOKEN
@@ -318,9 +333,8 @@ class Metadata115Sync(_PluginBase):
             return schemas.Response(success=False, message="API密钥错误")
         if self._running:
             return schemas.Response(success=False, message="当前已有任务运行，请等待或停止")
-        # 扫描预览是短任务：同步执行，API返回后页面自动刷新即可看到完整结果。
-        result = self.scan_preview()
-        return schemas.Response(success=True, data=result, message="扫描完成")
+        self._start_worker("scan")
+        return schemas.Response(success=True, message="扫描任务已启动")
 
     def stop_api(self, apikey: str = ""):
         if apikey and not self._check_api_key(apikey):
@@ -454,203 +468,153 @@ class Metadata115Sync(_PluginBase):
     def scan_preview(self):
         mappings = self._mappings_list()
         if not mappings:
-            self._set_status(
-                state="配置错误",
-                scanned=0,
-                existing=0,
-                pending=0,
-                uploaded=0,
-                skipped=0,
-                failed=0,
-                message="没有配置有效的目录映射",
-            )
+            self._set_status(state="配置错误", scanned=0, existing=0, pending=0, uploaded=0, skipped=0, failed=0, current=0, total=0, percent=0, current_file="", message="没有配置有效的目录映射")
             logger.error("Metadata115Sync：没有配置有效的目录映射")
             return {"status": "invalid_mapping"}
 
-        chain = StorageChain()
-        totals = {
-            "scanned": 0,
-            "existing": 0,
-            "pending": 0,
-            "skipped": 0,
-            "failed": 0,
-        }
-        self._set_status(
-            state="扫描中",
-            scanned=0,
-            existing=0,
-            pending=0,
-            uploaded=0,
-            skipped=0,
-            failed=0,
-            message="正在扫描本地目录并检查115目录",
-        )
+        totals = {"scanned": 0, "existing": 0, "pending": 0, "uploaded": 0, "skipped": 0, "failed": 0}
+        self._set_progress(0, 0, state="扫描中", **totals, message="正在扫描本地文件")
         logger.info("Metadata115Sync：开始扫描预览")
 
+        # 第一阶段只扫描本地文件，建立候选集；这一阶段完全不访问115。
+        candidates = []
+        cache = self._load_cache()
         for root, remote_root in mappings:
             if self._stop_event.is_set():
                 break
             if not root.is_dir():
                 logger.error("Metadata115Sync：本地目录不存在：%s", root)
                 continue
-
-            local_files, local_dirs = self._collect_local(root)
-            totals["scanned"] += len(local_files)
-            logger.info(
-                "Metadata115Sync：扫描 %s，发现 %d 个元数据文件",
-                root,
-                len(local_files),
-            )
-
-            folder_cache = {}
-            remote_index = {}
-
-            # 预览绝不创建远程目录；只查询已经存在的目录。
-            for local_dir in local_dirs:
-                if self._stop_event.is_set():
-                    break
-                rel = local_dir.relative_to(root).as_posix()
-                remote_dir = self._remote(
-                    remote_root if rel == "." else f"{remote_root}/{rel}"
-                )
-                folder = chain.get_file_item("u115", Path(remote_dir))
-                if not folder or folder.type != "dir":
+            for local, stat in self._iter_local(root) or []:
+                totals["scanned"] += 1
+                key = self._cache_key(local, root, remote_root)
+                if self._cache_hit(cache, key, stat):
+                    totals["skipped"] += 1
                     continue
-                folder_cache[remote_dir] = folder
-                remote_index[remote_dir] = self._remote_dir_index(chain, folder)
-
-            for local, stat in local_files:
-                if self._stop_event.is_set():
-                    break
                 rel = local.parent.relative_to(root).as_posix()
-                remote_dir = self._remote(
-                    remote_root if rel == "." else f"{remote_root}/{rel}"
-                )
-                if local.name in remote_index.get(remote_dir, {}):
+                remote_dir = self._remote(remote_root if rel == "." else f"{remote_root}/{rel}")
+                candidates.append((local, stat, root, remote_root, remote_dir, key))
+                if totals["scanned"] % 100 == 0:
+                    self._set_progress(totals["scanned"], 0, state="扫描本地文件", current_file=str(local), **totals, message="本地扫描中，尚未访问115")
+
+        total_work = len(candidates)
+        self._set_progress(0, total_work, state="检查115", **totals, message=f"本地扫描完成，待检查115：{total_work}")
+        logger.info("Metadata115Sync：本地扫描完成，共 %d 个文件，缓存命中 %d 个，需检查115 %d 个", totals["scanned"], totals["skipped"], total_work)
+
+        # 第二阶段只对缓存未命中的文件访问115，并按远程目录去重查询。
+        chain = StorageChain()
+        dir_groups = {}
+        for item in candidates:
+            dir_groups.setdefault(item[4], []).append(item)
+
+        checked = 0
+        remote_index = {}
+        for remote_dir, items in dir_groups.items():
+            if self._stop_event.is_set():
+                break
+            folder = chain.get_file_item("u115", Path(remote_dir))
+            if folder and folder.type == "dir":
+                remote_index[remote_dir] = self._remote_dir_index(chain, folder)
+            else:
+                remote_index[remote_dir] = {}
+            for local, stat, root, remote_root, _, key in items:
+                checked += 1
+                if local.name in remote_index[remote_dir]:
                     totals["existing"] += 1
+                    self._cache_mark(cache, key, stat)
                 else:
                     totals["pending"] += 1
+                if checked % 20 == 0 or checked == total_work:
+                    self._set_progress(checked, total_work, state="检查115", current_file=str(local), **totals, message=f"正在检查115：{checked}/{total_work}")
 
-            logger.info(
-                "Metadata115Sync：%s → %s：已有 %d，待同步 %d",
-                root,
-                remote_root,
-                totals["existing"],
-                totals["pending"],
-            )
+        if self._cache_enabled:
+            self._save_cache(cache)
 
         if self._stop_event.is_set():
-            state = "已停止"
-            message = "扫描预览已停止"
+            state, message = "已停止", "扫描预览已停止"
         else:
-            state = "扫描完成"
-            message = "扫描预览完成"
-
-        self._set_status(state=state, message=message, **totals)
-        logger.info(
-            "Metadata115Sync：扫描完成，文件 %d，已有 %d，待同步 %d",
-            totals["scanned"],
-            totals["existing"],
-            totals["pending"],
-        )
+            state, message = "扫描完成", "扫描预览完成"
+        self._set_progress(total_work if not self._stop_event.is_set() else checked, total_work, state=state, current_file="", **totals, message=message)
+        logger.info("Metadata115Sync：扫描完成，文件 %d，缓存跳过 %d，115已有 %d，待同步 %d", totals["scanned"], totals["skipped"], totals["existing"], totals["pending"])
         return {"status": state, **totals}
 
-    def _process_mapping(
-        self,
-        chain: StorageChain,
-        root: Path,
-        remote_root: str,
-        cache: dict,
-        totals: dict,
-    ):
+    def _process_mapping(self, chain: StorageChain, root: Path, remote_root: str, cache: dict, totals: dict):
         if not root.is_dir():
             logger.error("Metadata115Sync：本地目录不存在：%s", root)
             return
 
-        local_files, local_dirs = self._collect_local(root)
+        local_files, _ = self._collect_local(root)
         totals["scanned"] += len(local_files)
 
-        folder_cache = {}
-        remote_index = {}
-
-        # 同一轮同步中，每个远程目录只查询一次。
-        for local_dir in local_dirs:
+        # 关键优化：先用本地缓存过滤，缓存命中的文件不查询115。
+        candidates = []
+        for local, stat in local_files:
             if self._stop_event.is_set():
                 return
-            rel = local_dir.relative_to(root).as_posix()
-            remote_dir = self._remote(
-                remote_root if rel == "." else f"{remote_root}/{rel}"
-            )
+            key = self._cache_key(local, root, remote_root)
+            if self._cache_hit(cache, key, stat):
+                totals["skipped"] += 1
+                continue
+            rel = local.parent.relative_to(root).as_posix()
+            remote_dir = self._remote(remote_root if rel == "." else f"{remote_root}/{rel}")
+            candidates.append((local, stat, remote_dir, key))
+
+        # 只有真正需要检查的文件才触发115目录查询；每个目录一轮只查询一次。
+        folder_cache = {}
+        remote_index = {}
+        dir_groups = {}
+        for item in candidates:
+            dir_groups.setdefault(item[2], []).append(item)
+
+        for remote_dir in dir_groups:
+            if self._stop_event.is_set():
+                return
             folder = chain.get_file_item("u115", Path(remote_dir))
             if folder and folder.type == "dir":
                 folder_cache[remote_dir] = folder
                 remote_index[remote_dir] = self._remote_dir_index(chain, folder)
+            else:
+                remote_index[remote_dir] = {}
 
         pending = []
-        for local, stat in local_files:
+        for local, stat, remote_dir, key in candidates:
             if self._stop_event.is_set():
                 return
-            rel = local.parent.relative_to(root).as_posix()
-            remote_dir = self._remote(
-                remote_root if rel == "." else f"{remote_root}/{rel}"
-            )
-            key = self._cache_key(local, root, remote_root)
-
-            if self._cache_hit(cache, key, stat):
-                totals["skipped"] += 1
-                continue
-
             if local.name in remote_index.get(remote_dir, {}):
                 totals["existing"] += 1
                 self._cache_mark(cache, key, stat)
-                continue
-
-            pending.append((local, stat, remote_dir, key))
+            else:
+                pending.append((local, stat, remote_dir, key))
 
         totals["pending"] += len(pending)
-        logger.info(
-            "Metadata115Sync：%s → %s：扫描 %d，已有 %d，待同步 %d",
-            root,
-            remote_root,
-            len(local_files),
-            totals["existing"],
-            len(pending),
-        )
+        logger.info("Metadata115Sync：%s → %s：扫描 %d，缓存跳过 %d，115已有 %d，待同步 %d", root, remote_root, len(local_files), totals["skipped"], totals["existing"], len(pending))
 
-        # 低并发上传，默认2；避免为了速度制造大量115 API请求。
         import concurrent.futures
 
         def upload_one(item):
             local, stat, remote_dir, key = item
             if self._stop_event.is_set():
                 return False, key, "stopped"
-
             folder = folder_cache.get(remote_dir)
             if not folder:
                 folder = chain.get_folder("u115", Path(remote_dir))
                 if not folder:
                     return False, key, "folder"
-
             try:
-                result = chain.upload_file(
-                    fileitem=folder,
-                    path=local,
-                    new_name=local.name,
-                )
+                result = chain.upload_file(fileitem=folder, path=local, new_name=local.name)
                 return bool(result), key, ""
             except Exception as exc:
                 logger.error("Metadata115Sync：上传失败 %s：%s", local, exc)
                 return False, key, str(exc)
 
         by_key = {item[3]: item for item in pending}
-        with concurrent.futures.ThreadPoolExecutor(
-            max_workers=self._concurrency,
-            thread_name_prefix="Metadata115Sync",
-        ) as executor:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=self._concurrency, thread_name_prefix="Metadata115Sync") as executor:
             futures = [executor.submit(upload_one, item) for item in pending]
+            done = 0
             for future in concurrent.futures.as_completed(futures):
                 ok, key, reason = future.result()
                 item = by_key[key]
+                done += 1
                 if ok:
                     totals["uploaded"] += 1
                     self._cache_mark(cache, key, item[1])
@@ -659,17 +623,7 @@ class Metadata115Sync(_PluginBase):
                     return
                 else:
                     totals["failed"] += 1
-
-                self._set_status(
-                    state="同步中",
-                    scanned=totals["scanned"],
-                    existing=totals["existing"],
-                    pending=totals["pending"],
-                    uploaded=totals["uploaded"],
-                    skipped=totals["skipped"],
-                    failed=totals["failed"],
-                    message=f"正在同步：已上传 {totals['uploaded']}",
-                )
+                self._set_progress(done, len(pending), state="同步中", current_file=str(item[0]), **totals, message=f"正在同步：{done}/{len(pending)}")
 
     def sync(self):
         if self._running and threading.current_thread() is not self._worker:
@@ -706,11 +660,7 @@ class Metadata115Sync(_PluginBase):
         cache = self._load_cache()
         chain = StorageChain()
 
-        self._set_status(
-            state="同步中",
-            **totals,
-            message="开始同步",
-        )
+        self._set_progress(0, 0, state="同步中", current_file="", **totals, message="开始同步")
         logger.info("Metadata115Sync：开始同步")
 
         try:
@@ -740,7 +690,7 @@ class Metadata115Sync(_PluginBase):
                     totals["failed"],
                 )
 
-            self._set_status(state=state, message=message, **totals)
+            self._set_progress(totals.get("uploaded", 0), totals.get("pending", 0), state=state, current_file="", **totals, message=message)
             return {"status": state, **totals}
         except Exception as exc:
             logger.exception("Metadata115Sync：同步任务异常：%s", exc)

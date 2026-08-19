@@ -8,7 +8,7 @@ META = Path("package.v2.json")
 def test_plugin_compiles_and_contract_matches():
     code = PLUGIN.read_text(encoding="utf-8")
     ast.parse(code)
-    assert 'plugin_version = "2.5.0"' in code
+    assert 'plugin_version = "2.6.0"' in code
     assert 'def get_api(self)' in code
     assert '"path": "/scan"' in code
     assert '"path": "/stop"' in code
@@ -22,4 +22,4 @@ def test_plugin_compiles_and_contract_matches():
     assert 'chain.get_folder' in code
     assert 'chain.upload_file' in code
     meta = json.loads(META.read_text(encoding="utf-8"))
-    assert meta["Metadata115Sync"]["version"] == "2.5.0"
+    assert meta["Metadata115Sync"]["version"] == "2.6.0"
