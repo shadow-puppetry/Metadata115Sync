@@ -3,13 +3,13 @@
     "name": "115元数据同步",
     "description": "本地元数据单向同步到115，不使用TMDB。",
     "labels": "云盘,元数据",
-    "version": "2.4.0",
+    "version": "2.5.0",
     "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/u115.png",
     "author": "shadow-puppetry",
     "level": 1,
     "system_version": ">=2.13.0,<3",
     "history": {
-      "v2.4.0": "重构同步流程：目录级远程索引、本地缓存、低并发上传、停止任务；移除自建日志面板。"
+      "v2.5.0": "修复详情页扫描预览无结果问题；扫描结果直接显示在插件页面；增加完整日志；停止任务；目录级远程索引与本地缓存优化请求次数。"
     }
   }
 }
