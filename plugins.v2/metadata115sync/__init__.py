@@ -21,7 +21,7 @@ class Metadata115Sync(_PluginBase):
     plugin_name = "Metadata115Sync"
     plugin_desc = "本地元数据单向同步到115，不使用TMDB。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/u115.png"
-    plugin_version = "2.7.0"
+    plugin_version = "2.8.0"
     plugin_author = "shadow-puppetry"
     author_url = ""
     plugin_config_prefix = "metadata115sync_"
@@ -31,6 +31,7 @@ class Metadata115Sync(_PluginBase):
     _enabled = False
     _onlyonce = False
     _mappings = ""
+    _exclude_dirs = ""
     _extensions = ".nfo,.jpg,.jpeg,.png,.webp,.xml"
     _max_size_mb = 20
     _interval = 60
@@ -66,6 +67,7 @@ class Metadata115Sync(_PluginBase):
         self._enabled = bool(config.get("enabled", False))
         self._onlyonce = bool(config.get("onlyonce", False))
         self._mappings = str(config.get("mappings") or "")
+        self._exclude_dirs = str(config.get("exclude_dirs") or "")
         self._extensions = str(config.get("extensions") or self._extensions)
         self._max_size_mb = max(1, self._to_int(config.get("max_size_mb"), 20))
         self._interval = max(5, self._to_int(config.get("interval"), 60))
@@ -97,6 +99,7 @@ class Metadata115Sync(_PluginBase):
             "enabled": self._enabled,
             "onlyonce": self._onlyonce,
             "mappings": self._mappings,
+            "exclude_dirs": self._exclude_dirs,
             "extensions": self._extensions,
             "max_size_mb": self._max_size_mb,
             "interval": self._interval,
@@ -134,6 +137,7 @@ class Metadata115Sync(_PluginBase):
                 {"component": "VSwitch", "props": {"model": "enabled", "label": "启用元数据同步"}},
                 {"component": "VSwitch", "props": {"model": "onlyonce", "label": "立即运行一次"}},
                 {"component": "VTextarea", "props": {"model": "mappings", "label": "本地目录 → 115目录映射", "rows": 4, "placeholder": "/strm=/影视库/媒体目录"}},
+                {"component": "VTextarea", "props": {"model": "exclude_dirs", "label": "排除目录（每行一个本地目录）", "rows": 3, "placeholder": "/strm/动漫电影/不同步"}},
                 {"component": "VTextField", "props": {"model": "extensions", "label": "元数据扩展名", "placeholder": ".nfo,.jpg,.jpeg,.png,.webp,.xml"}},
                 {"component": "VTextField", "props": {"model": "max_size_mb", "label": "单文件大小上限（MB）", "type": "number"}},
                 {"component": "VTextField", "props": {"model": "interval", "label": "自动同步间隔（分钟）", "type": "number"}},
@@ -145,6 +149,7 @@ class Metadata115Sync(_PluginBase):
             "enabled": False,
             "onlyonce": False,
             "mappings": "",
+            "exclude_dirs": "",
             "extensions": ".nfo,.jpg,.jpeg,.png,.webp,.xml",
             "max_size_mb": 20,
             "interval": 60,
@@ -298,6 +303,28 @@ class Metadata115Sync(_PluginBase):
                 result.append((Path(local).resolve(), self._remote(remote)))
         return result
 
+    def _exclude_paths(self) -> set[Path]:
+        """解析全局本地排除目录；目录本身及其所有子目录都会被跳过。"""
+        result: set[Path] = set()
+        for line in self._exclude_dirs.splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            try:
+                result.add(Path(line.replace("\\", "/")).resolve(strict=False))
+            except OSError:
+                result.add(Path(line.replace("\\", "/")).absolute())
+        return result
+
+    @staticmethod
+    def _is_excluded(path: Path, excluded: set[Path]) -> bool:
+        """判断目录是否位于任一排除目录之下。"""
+        try:
+            path = path.resolve(strict=False)
+        except OSError:
+            path = path.absolute()
+        return any(path == item or item in path.parents for item in excluded)
+
     def _extensions_set(self) -> set[str]:
         result = set()
         for ext in self._extensions.split(","):
@@ -306,7 +333,7 @@ class Metadata115Sync(_PluginBase):
                 result.add(ext if ext.startswith(".") else "." + ext)
         return result
 
-    def _iter_local(self, root: Path):
+    def _iter_local(self, root: Path, excluded: set[Path]):
         if not root.is_dir():
             return
         limit = self._max_size_mb * 1024 * 1024
@@ -314,7 +341,12 @@ class Metadata115Sync(_PluginBase):
         for current, dirs, files in os.walk(root):
             if self._stop_event.is_set():
                 return
-            dirs.sort()
+            current_path = Path(current)
+            if self._is_excluded(current_path, excluded):
+                dirs[:] = []
+                continue
+            # 在os.walk下沉前直接裁剪排除目录，排除目录内的文件不会进入扫描、缓存或115检查。
+            dirs[:] = [d for d in sorted(dirs) if not self._is_excluded(current_path / d, excluded)]
             files.sort()
             for name in files:
                 if self._stop_event.is_set():
@@ -344,13 +376,13 @@ class Metadata115Sync(_PluginBase):
         return f"{remote_root}|{local.relative_to(root).as_posix()}"
 
     def _cache_hit(self, cache: dict, key: str, stat) -> bool:
+        """本地文件缓存只由文件状态决定，不受115目录缓存TTL影响。"""
         if not self._cache_enabled:
             return False
         item = cache.get(key)
         if not item or item.get("size") != stat.st_size or int(item.get("mtime_ns", 0)) != int(stat.st_mtime_ns):
             return False
-        checked_at = float(item.get("checked_at", 0) or 0)
-        return item.get("status") in {"present", "uploaded"} and (time.time() - checked_at) < self._remote_cache_ttl_hours * 3600
+        return item.get("status") in {"present", "uploaded"}
 
     @staticmethod
     def _cache_mark(cache: dict, key: str, stat, status: str = "present"):
@@ -384,7 +416,7 @@ class Metadata115Sync(_PluginBase):
 
     def _mapping_fingerprint(self) -> str:
         raw = "\n".join(f"{a}|{b}" for a, b in self._mappings_list())
-        raw += f"|{self._extensions}|{self._max_size_mb}"
+        raw += f"|{self._extensions}|{self._max_size_mb}|{self._exclude_dirs}"
         return hashlib.sha1(raw.encode("utf-8")).hexdigest()
 
     # ---------------- plan ----------------
@@ -407,13 +439,14 @@ class Metadata115Sync(_PluginBase):
         candidates = []
         seen = set()
         mappings = self._mappings_list()
+        excluded = self._exclude_paths()
         for root, remote_root in mappings:
             if self._stop_event.is_set():
                 break
             if not root.is_dir():
                 logger.error("Metadata115Sync：本地目录不存在：%s", root)
                 continue
-            for local, stat in self._iter_local(root) or []:
+            for local, stat in self._iter_local(root, excluded) or []:
                 totals["scanned"] += 1
                 key = self._cache_key(local, root, remote_root)
                 if self._cache_hit(cache, key, stat):
@@ -440,6 +473,9 @@ class Metadata115Sync(_PluginBase):
         totals = {"scanned": 0, "existing": 0, "pending": 0, "uploaded": 0, "skipped": 0, "failed": 0}
         self._set_progress(0, 0, state="扫描本地", force=True, started_at=time.time(), **totals, message="开始扫描本地文件")
         logger.info("Metadata115Sync：开始扫描预览")
+        excluded = self._exclude_paths()
+        if excluded:
+            logger.info("Metadata115Sync：已启用 %d 个排除目录", len(excluded))
         cache = self._load_cache()
         candidates = self._collect_candidates(cache, totals)
         if self._stop_event.is_set():

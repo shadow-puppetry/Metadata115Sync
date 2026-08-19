@@ -63,7 +63,7 @@ def _load_plugin():
 def test_plugin_compiles_and_contract_matches():
     code = PLUGIN.read_text(encoding="utf-8")
     ast.parse(code)
-    assert 'plugin_version = "2.7.0"' in code
+    assert 'plugin_version = "2.8.0"' in code
     assert 'def get_api(self)' in code
     for path in ('"path": "/scan"', '"path": "/stop"', '"path": "/sync"', '"path": "/status"'):
         assert path in code
@@ -71,12 +71,14 @@ def test_plugin_compiles_and_contract_matches():
     assert 'self.save_data("file_cache", cache)' in code
     assert 'self.save_data("remote_dir_cache", cache)' in code
     assert 'self.save_data("sync_plan"' in code
+    assert 'exclude_dirs' in code
+    assert '_is_excluded' in code
     assert 'chain.list_files' in code
     assert 'chain.get_file_item' in code
     assert 'chain.get_folder' in code
     assert 'chain.upload_file' in code
     meta = json.loads(META.read_text(encoding="utf-8"))
-    assert meta["Metadata115Sync"]["version"] == "2.7.0"
+    assert meta["Metadata115Sync"]["version"] == "2.8.0"
 
 
 def test_cache_requires_same_size_mtime_and_fresh_remote_check():
@@ -143,3 +145,33 @@ def test_sync_plan_is_reused_without_second_remote_scan():
     plan = p._load_plan()
     assert plan is not None
     assert plan["entries"] == []
+
+
+def test_excluded_directory_is_pruned_from_scan(tmp_path):
+    Plugin, _ = _load_plugin()
+    p = Plugin()
+    root = tmp_path / "strm"
+    keep = root / "电影"
+    excluded = root / "不同步"
+    keep.mkdir(parents=True)
+    excluded.mkdir(parents=True)
+    (keep / "ok.nfo").write_text("ok", encoding="utf-8")
+    (excluded / "skip.nfo").write_text("skip", encoding="utf-8")
+    p._extensions = ".nfo"
+    p._max_size_mb = 20
+    p._exclude_dirs = str(excluded)
+    totals = {"scanned": 0, "existing": 0, "pending": 0, "uploaded": 0, "skipped": 0, "failed": 0}
+    candidates = list(p._iter_local(root, p._exclude_paths()))
+    assert [x[0].name for x in candidates] == ["ok.nfo"]
+
+
+def test_local_cache_does_not_expire_with_remote_ttl():
+    Plugin, _ = _load_plugin()
+    p = Plugin()
+    p._cache_enabled = True
+    p._remote_cache_ttl_hours = 1
+    from types import SimpleNamespace
+    import time
+    stat = SimpleNamespace(st_size=10, st_mtime_ns=100)
+    cache = {"k": {"size": 10, "mtime_ns": 100, "checked_at": time.time() - 7200, "status": "present"}}
+    assert p._cache_hit(cache, "k", stat)

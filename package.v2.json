@@ -3,12 +3,13 @@
     "name": "115元数据同步",
     "description": "本地元数据单向同步到115，不使用TMDB。",
     "labels": "云盘,元数据",
-    "version": "2.7.0",
+    "version": "2.8.0",
     "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/u115.png",
     "author": "shadow-puppetry",
     "level": 1,
     "system_version": ">=2.13.0,<3",
     "history": {
+      "v2.8.0": "增加排除目录并在本地扫描阶段直接裁剪排除目录；本地文件缓存与115目录缓存彻底分离，本地文件未变化时不因远程TTL到期而重新访问115。",
       "v2.7.0": "重构增量同步：本地缓存前置、115目录缓存、目录级一次查询、可复用扫描计划、批量上传与限频状态持久化。",
       "v2.6.0": "缓存前置：缓存命中不访问115；扫描预览增加进度与可停止任务。"
     }
