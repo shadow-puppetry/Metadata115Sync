@@ -63,7 +63,7 @@ def _load_plugin():
 def test_plugin_compiles_and_contract_matches():
     code = PLUGIN.read_text(encoding="utf-8")
     ast.parse(code)
-    assert 'plugin_version = "2.8.0"' in code
+    assert 'plugin_version = "2.9.0"' in code
     assert 'def get_api(self)' in code
     for path in ('"path": "/scan"', '"path": "/stop"', '"path": "/sync"', '"path": "/status"'):
         assert path in code
@@ -78,7 +78,7 @@ def test_plugin_compiles_and_contract_matches():
     assert 'chain.get_folder' in code
     assert 'chain.upload_file' in code
     meta = json.loads(META.read_text(encoding="utf-8"))
-    assert meta["Metadata115Sync"]["version"] == "2.8.0"
+    assert meta["Metadata115Sync"]["version"] == "2.9.0"
 
 
 def test_cache_requires_same_size_mtime_and_fresh_remote_check():
@@ -175,3 +175,50 @@ def test_local_cache_does_not_expire_with_remote_ttl():
     stat = SimpleNamespace(st_size=10, st_mtime_ns=100)
     cache = {"k": {"size": 10, "mtime_ns": 100, "checked_at": time.time() - 7200, "status": "present"}}
     assert p._cache_hit(cache, "k", stat)
+
+
+def test_remote_cache_miss_forces_refresh_and_finds_new_file():
+    Plugin, _ = _load_plugin()
+    p = Plugin()
+    p._cache_enabled = True
+    p._remote_cache_ttl_hours = 6
+
+    class Item:
+        def __init__(self, name, typ="file"):
+            self.name = name
+            self.type = typ
+
+    class Chain:
+        def __init__(self):
+            self.calls = 0
+        def get_file_item(self, storage, path):
+            return Item("dir", "dir")
+        def list_files(self, folder, recursion=False):
+            self.calls += 1
+            return [Item("海\u0301.nfo")]
+
+    c = Chain()
+    remote_cache = {"/影视库/A": {"checked_at": __import__("time").time(), "files": [], "missing": False}}
+    names, _, cached = p._remote_names(c, "/影视库/A", remote_cache)
+    assert cached is True
+    assert names == set()
+    refreshed, _, refreshed_cached = p._remote_names(c, "/影视库/A", remote_cache, refresh=True)
+    assert refreshed_cached is False
+    assert p._normalize_name("海\u0301.nfo") in refreshed
+    assert c.calls == 1
+
+
+def test_remote_missing_directory_is_not_cached_as_empty():
+    Plugin, _ = _load_plugin()
+    p = Plugin()
+    p._cache_enabled = True
+
+    class Chain:
+        def get_file_item(self, storage, path):
+            return None
+
+    remote_cache = {}
+    names, _, cached = p._remote_names(Chain(), "/不存在", remote_cache)
+    assert names == set()
+    assert cached is False
+    assert "/不存在" not in remote_cache

@@ -5,6 +5,7 @@ import hashlib
 import os
 import threading
 import time
+import unicodedata
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -21,7 +22,7 @@ class Metadata115Sync(_PluginBase):
     plugin_name = "Metadata115Sync"
     plugin_desc = "本地元数据单向同步到115，不使用TMDB。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/u115.png"
-    plugin_version = "2.8.0"
+    plugin_version = "2.9.0"
     plugin_author = "shadow-puppetry"
     author_url = ""
     plugin_config_prefix = "metadata115sync_"
@@ -398,9 +399,14 @@ class Metadata115Sync(_PluginBase):
     def _remote_cache_fresh(self, item: dict) -> bool:
         return bool(item and time.time() - float(item.get("checked_at", 0) or 0) < self._remote_cache_ttl_hours * 3600)
 
+    @staticmethod
+    def _normalize_name(name: str) -> str:
+        """统一Unicode规范化，避免同一个可见文件名因组合字符形式不同而匹配失败。"""
+        return unicodedata.normalize("NFC", str(name or ""))
+
     def _remote_dir_index(self, chain: StorageChain, folder: schemas.FileItem) -> Dict[str, schemas.FileItem]:
         items = chain.list_files(folder, recursion=False) or []
-        return {item.name: item for item in items if item.type == "file" and item.name}
+        return {self._normalize_name(item.name): item for item in items if item.type == "file" and item.name}
 
     def _remote_names(self, chain: StorageChain, remote_dir: str, remote_cache: dict, refresh: bool = False) -> Tuple[set[str], Optional[schemas.FileItem], bool]:
         cached = remote_cache.get(remote_dir)
@@ -408,7 +414,8 @@ class Metadata115Sync(_PluginBase):
             return set(cached.get("files", [])), None, True
         folder = chain.get_file_item("u115", Path(remote_dir))
         if not folder or folder.type != "dir":
-            remote_cache[remote_dir] = {"checked_at": time.time(), "files": [], "missing": True}
+            # 不把“查询失败/目录暂时不可见”缓存成空目录，否则会在TTL内持续误判文件不存在。
+            remote_cache.pop(remote_dir, None)
             return set(), None, False
         index = self._remote_dir_index(chain, folder)
         remote_cache[remote_dir] = {"checked_at": time.time(), "files": sorted(index.keys()), "missing": False}
@@ -501,9 +508,17 @@ class Metadata115Sync(_PluginBase):
             names, _, cache_used = self._remote_names(chain, remote_dir, remote_cache)
             if not cache_used:
                 remote_api_dirs += 1
+            # 远程目录缓存只对“存在”提供快速命中；缓存中缺失的文件必须刷新一次目录，避免6小时TTL导致误上传。
+            missing_in_cache = [local for local, _, _, _ in items if self._normalize_name(local.name) not in names]
+            if cache_used and missing_in_cache:
+                refreshed_names, _, refreshed_cached = self._remote_names(chain, remote_dir, remote_cache, refresh=True)
+                names = refreshed_names
+                if not refreshed_cached:
+                    remote_api_dirs += 1
+                logger.info("Metadata115Sync：目录缓存未找到 %d 个文件，已强制刷新115目录：%s", len(missing_in_cache), remote_dir)
             for local, stat, _, key in items:
                 checked += 1
-                if local.name in names:
+                if self._normalize_name(local.name) in names:
                     totals["existing"] += 1
                     self._cache_mark(cache, key, stat, "present")
                 else:
@@ -552,9 +567,17 @@ class Metadata115Sync(_PluginBase):
             if self._stop_event.is_set():
                 break
             names, _, _ = self._remote_names(chain, remote_dir, remote_cache)
+            # 远程目录缓存只对“存在”提供快速命中；缓存中缺失的文件必须刷新一次目录，避免6小时TTL导致误上传。
+            missing_in_cache = [local for local, _, _, _ in items if self._normalize_name(local.name) not in names]
+            if cache_used and missing_in_cache:
+                refreshed_names, _, refreshed_cached = self._remote_names(chain, remote_dir, remote_cache, refresh=True)
+                names = refreshed_names
+                if not refreshed_cached:
+                    remote_api_dirs += 1
+                logger.info("Metadata115Sync：目录缓存未找到 %d 个文件，已强制刷新115目录：%s", len(missing_in_cache), remote_dir)
             for local, stat, _, key in items:
                 checked += 1
-                if local.name in names:
+                if self._normalize_name(local.name) in names:
                     totals["existing"] += 1
                     self._cache_mark(cache, key, stat, "present")
                 else:
