@@ -63,7 +63,7 @@ def _load_plugin():
 def test_plugin_compiles_and_contract_matches():
     code = PLUGIN.read_text(encoding="utf-8")
     ast.parse(code)
-    assert 'plugin_version = "2.9.0"' in code
+    assert 'plugin_version = "2.10.0"' in code
     assert 'def get_api(self)' in code
     for path in ('"path": "/scan"', '"path": "/stop"', '"path": "/sync"', '"path": "/status"'):
         assert path in code
@@ -78,7 +78,7 @@ def test_plugin_compiles_and_contract_matches():
     assert 'chain.get_folder' in code
     assert 'chain.upload_file' in code
     meta = json.loads(META.read_text(encoding="utf-8"))
-    assert meta["Metadata115Sync"]["version"] == "2.9.0"
+    assert meta["Metadata115Sync"]["version"] == "2.10.0"
 
 
 def test_cache_requires_same_size_mtime_and_fresh_remote_check():
@@ -93,9 +93,9 @@ def test_cache_requires_same_size_mtime_and_fresh_remote_check():
     assert p._cache_hit(cache, "k", stat)
     stat.st_mtime_ns = 101
     assert not p._cache_hit(cache, "k", stat)
-    cache["k"]["mtime_ns"] = 100
+    cache["k"]["mtime_ns"] = 101
     cache["k"]["checked_at"] = time.time() - 7200
-    assert not p._cache_hit(cache, "k", stat)
+    assert p._cache_hit(cache, "k", stat)
 
 
 def test_remote_directory_is_queried_once_and_then_cached():
@@ -206,6 +206,89 @@ def test_remote_cache_miss_forces_refresh_and_finds_new_file():
     assert refreshed_cached is False
     assert p._normalize_name("海\u0301.nfo") in refreshed
     assert c.calls == 1
+
+
+def test_modified_local_file_overwrites_existing_remote(tmp_path):
+    Plugin, chain_mod = _load_plugin()
+    class Item:
+        def __init__(self, name, typ="file", fileid="123"):
+            self.name = name
+            self.type = typ
+            self.fileid = fileid
+            self.path = "/影视库/A/" + name if typ == "file" else "/影视库/A/"
+    class Chain:
+        def __init__(self):
+            self.deleted = []
+            self.uploaded = []
+        def get_folder(self, storage, path):
+            return Item("A", "dir", "99")
+        def get_file_item(self, storage, path):
+            return Item(Path(path).name, "file", "123")
+        def delete_file(self, item):
+            self.deleted.append(item.name)
+            return True
+        def upload_file(self, fileitem, path, new_name=None):
+            self.uploaded.append(path.name)
+            return Item(path.name)
+    fake = Chain()
+    Plugin.sync.__globals__["StorageChain"] = lambda: fake
+    p = Plugin()
+    p._cache_enabled = True
+    p._mappings = f"{tmp_path}=/影视库/A"
+    p._extensions = ".nfo"
+    p._max_size_mb = 20
+    local = tmp_path / "a.nfo"
+    local.write_text("new", encoding="utf-8")
+    stat = local.stat()
+    key = p._cache_key(local, tmp_path, "/影视库/A")
+    p.save_data("sync_plan", {
+        "created_at": 1,
+        "fingerprint": p._mapping_fingerprint(),
+        "entries": [{"path": str(local), "size": stat.st_size, "mtime_ns": stat.st_mtime_ns,
+                     "remote_dir": "/影视库/A", "cache_key": key, "action": "overwrite"}],
+    })
+    result = p.sync()
+    assert result["status"] == "同步完成"
+    assert result["updated"] == 1
+    assert fake.deleted == ["a.nfo"]
+    assert fake.uploaded == ["a.nfo"]
+
+
+def test_modified_file_plan_is_overwrite_but_first_discovery_skips(tmp_path):
+    Plugin, _ = _load_plugin()
+    class Item:
+        def __init__(self, name, typ="file"):
+            self.name = name
+            self.type = typ
+    class Chain:
+        def get_file_item(self, storage, path):
+            return Item("A", "dir")
+        def list_files(self, folder, recursion=False):
+            return [Item("a.nfo")]
+    Plugin.scan_preview.__globals__["StorageChain"] = Chain
+    p = Plugin()
+    p._cache_enabled = True
+    p._mappings = f"{tmp_path}=/影视库/A"
+    p._extensions = ".nfo"
+    p._max_size_mb = 20
+    local = tmp_path / "a.nfo"
+    local.write_text("new", encoding="utf-8")
+    stat = local.stat()
+    key = p._cache_key(local, tmp_path, "/影视库/A")
+    p.save_data("file_cache", {key: {"size": stat.st_size, "mtime_ns": stat.st_mtime_ns - 1, "checked_at": 1, "status": "uploaded"}})
+    result = p.scan_preview()
+    assert result["pending"] == 1
+    plan = p.get_data("sync_plan")
+    assert plan["entries"][0]["action"] == "overwrite"
+
+    p2 = Plugin()
+    p2._cache_enabled = True
+    p2._mappings = f"{tmp_path}=/影视库/A"
+    p2._extensions = ".nfo"
+    p2._max_size_mb = 20
+    p2.scan_preview()
+    plan2 = p2.get_data("sync_plan")
+    assert plan2["entries"] == []
 
 
 def test_remote_missing_directory_is_not_cached_as_empty():
