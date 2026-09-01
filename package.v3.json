@@ -1,0 +1,15 @@
+{
+  "Metadata115Sync": {
+    "name": "Metadata115Sync",
+    "description": "本地元数据增量同步到 MoviePilot 已配置的 115 网盘。",
+    "labels": "元数据,115,网盘",
+    "version": "1.0.0",
+    "icon": "Moviepilot_A.png",
+    "author": "OpenAI",
+    "level": 1,
+    "system_version": ">=3.0.0",
+    "history": {
+      "v1.0.0": "首次发布 V3 版本。"
+    }
+  }
+}
