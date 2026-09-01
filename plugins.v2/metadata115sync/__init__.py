@@ -22,7 +22,7 @@ class Metadata115Sync(_PluginBase):
     plugin_name = "Metadata115Sync"
     plugin_desc = "本地元数据单向同步到115，不使用TMDB。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/u115.png"
-    plugin_version = "2.10.0"
+    plugin_version = "2.11.0"
     plugin_author = "shadow-puppetry"
     author_url = ""
     plugin_config_prefix = "metadata115sync_"
@@ -468,8 +468,14 @@ class Metadata115Sync(_PluginBase):
                     continue
                 seen.add(dedupe)
                 cached_item = cache.get(key) if self._cache_enabled else None
-                modified = bool(cached_item and cached_item.get("status") in {"present", "uploaded"})
-                candidates.append((local, stat, remote_dir, key, modified))
+                # 只有相对上次确认基线的 size 与 mtime_ns 同时变化，才触发覆盖。
+                modified = bool(
+                    cached_item
+                    and cached_item.get("status") in {"present", "uploaded"}
+                    and int(cached_item.get("size", -1)) != int(stat.st_size)
+                    and int(cached_item.get("mtime_ns", -1)) != int(stat.st_mtime_ns)
+                )
+                candidates.append((local, stat, remote_dir, key, modified, cached_item))
                 if totals["scanned"] % 250 == 0:
                     self._set_progress(totals["scanned"], 0, state="扫描本地", current_file=str(local), current_dir=remote_dir, **totals, message="只扫描本地文件，尚未访问115")
         return candidates
@@ -513,24 +519,33 @@ class Metadata115Sync(_PluginBase):
             if not cache_used:
                 remote_api_dirs += 1
             # 远程目录缓存只对“存在”提供快速命中；缓存中缺失的文件必须刷新一次目录，避免6小时TTL导致误上传。
-            missing_in_cache = [local for local, _, _, _, _ in items if self._normalize_name(local.name) not in names]
+            missing_in_cache = [local for local, _, _, _, _, _ in items if self._normalize_name(local.name) not in names]
             if cache_used and missing_in_cache:
                 refreshed_names, _, refreshed_cached = self._remote_names(chain, remote_dir, remote_cache, refresh=True)
                 names = refreshed_names
                 if not refreshed_cached:
                     remote_api_dirs += 1
                 logger.info("Metadata115Sync：目录缓存未找到 %d 个文件，已强制刷新115目录：%s", len(missing_in_cache), remote_dir)
-            for local, stat, _, key, modified in items:
+            for local, stat, _, key, modified, cached_item in items:
                 checked += 1
                 name = self._normalize_name(local.name)
                 if name in names:
                     if modified:
                         totals["pending"] += 1
                         plan_entries.append({"path": str(local), "size": int(stat.st_size), "mtime_ns": int(stat.st_mtime_ns), "remote_dir": remote_dir, "cache_key": key, "action": "overwrite"})
-                        logger.info("Metadata115Sync：检测到本地文件已修改，准备覆盖115同名文件：%s", local)
+                        logger.info("Metadata115Sync：匹配到115同名文件，且本地 size 与 mtime_ns 均发生变化，准备覆盖：%s", local)
                     else:
                         totals["existing"] += 1
-                        self._cache_mark(cache, key, stat, "present")
+                        if cached_item:
+                            size_changed = int(cached_item.get("size", -1)) != int(stat.st_size)
+                            mtime_changed = int(cached_item.get("mtime_ns", -1)) != int(stat.st_mtime_ns)
+                            if size_changed or mtime_changed:
+                                logger.info("Metadata115Sync：115已有同名文件，但本地 size 与 mtime_ns 未同时变化，跳过：%s", local)
+                            else:
+                                logger.debug("Metadata115Sync：本地缓存命中且115已有同名文件，跳过：%s", local)
+                        else:
+                            logger.info("Metadata115Sync：首次发现115已有同名文件，建立本地基线并跳过：%s", local)
+                            self._cache_mark(cache, key, stat, "present")
                 else:
                     totals["pending"] += 1
                     plan_entries.append({"path": str(local), "size": int(stat.st_size), "mtime_ns": int(stat.st_mtime_ns), "remote_dir": remote_dir, "cache_key": key, "action": "upload"})
@@ -578,12 +593,12 @@ class Metadata115Sync(_PluginBase):
                 break
             names, _, cache_used = self._remote_names(chain, remote_dir, remote_cache)
             # 远程目录缓存只对“存在”提供快速命中；缓存中缺失的文件必须刷新一次目录，避免6小时TTL导致误上传。
-            missing_in_cache = [local for local, _, _, _, _ in items if self._normalize_name(local.name) not in names]
+            missing_in_cache = [local for local, _, _, _, _, _ in items if self._normalize_name(local.name) not in names]
             if cache_used and missing_in_cache:
                 refreshed_names, _, refreshed_cached = self._remote_names(chain, remote_dir, remote_cache, refresh=True)
                 names = refreshed_names
                 logger.info("Metadata115Sync：目录缓存未找到 %d 个文件，已强制刷新115目录：%s", len(missing_in_cache), remote_dir)
-            for local, stat, _, key, modified in items:
+            for local, stat, _, key, modified, cached_item in items:
                 checked += 1
                 name = self._normalize_name(local.name)
                 if name in names:
@@ -592,7 +607,13 @@ class Metadata115Sync(_PluginBase):
                         entries.append({"path": str(local), "size": int(stat.st_size), "mtime_ns": int(stat.st_mtime_ns), "remote_dir": remote_dir, "cache_key": key, "action": "overwrite"})
                     else:
                         totals["existing"] += 1
-                        self._cache_mark(cache, key, stat, "present")
+                        if cached_item:
+                            size_changed = int(cached_item.get("size", -1)) != int(stat.st_size)
+                            mtime_changed = int(cached_item.get("mtime_ns", -1)) != int(stat.st_mtime_ns)
+                            if size_changed or mtime_changed:
+                                logger.info("Metadata115Sync：115已有同名文件，但本地 size 与 mtime_ns 未同时变化，跳过：%s", local)
+                        else:
+                            self._cache_mark(cache, key, stat, "present")
                 else:
                     totals["pending"] += 1
                     entries.append({"path": str(local), "size": int(stat.st_size), "mtime_ns": int(stat.st_mtime_ns), "remote_dir": remote_dir, "cache_key": key, "action": "upload"})

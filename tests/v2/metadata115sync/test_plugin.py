@@ -63,7 +63,7 @@ def _load_plugin():
 def test_plugin_compiles_and_contract_matches():
     code = PLUGIN.read_text(encoding="utf-8")
     ast.parse(code)
-    assert 'plugin_version = "2.10.0"' in code
+    assert 'plugin_version = "2.11.0"' in code
     assert 'def get_api(self)' in code
     for path in ('"path": "/scan"', '"path": "/stop"', '"path": "/sync"', '"path": "/status"'):
         assert path in code
@@ -78,7 +78,7 @@ def test_plugin_compiles_and_contract_matches():
     assert 'chain.get_folder' in code
     assert 'chain.upload_file' in code
     meta = json.loads(META.read_text(encoding="utf-8"))
-    assert meta["Metadata115Sync"]["version"] == "2.10.0"
+    assert meta["Metadata115Sync"]["version"] == "2.11.0"
 
 
 def test_cache_requires_same_size_mtime_and_fresh_remote_check():
@@ -275,7 +275,7 @@ def test_modified_file_plan_is_overwrite_but_first_discovery_skips(tmp_path):
     local.write_text("new", encoding="utf-8")
     stat = local.stat()
     key = p._cache_key(local, tmp_path, "/影视库/A")
-    p.save_data("file_cache", {key: {"size": stat.st_size, "mtime_ns": stat.st_mtime_ns - 1, "checked_at": 1, "status": "uploaded"}})
+    p.save_data("file_cache", {key: {"size": stat.st_size - 1, "mtime_ns": stat.st_mtime_ns - 1, "checked_at": 1, "status": "uploaded"}})
     result = p.scan_preview()
     assert result["pending"] == 1
     plan = p.get_data("sync_plan")
@@ -305,3 +305,78 @@ def test_remote_missing_directory_is_not_cached_as_empty():
     assert names == set()
     assert cached is False
     assert "/不存在" not in remote_cache
+
+
+
+def test_change_detection_requires_both_size_and_mtime_change():
+    Plugin, _ = _load_plugin()
+    p = Plugin()
+    p._cache_enabled = True
+    from types import SimpleNamespace
+    base = {"size": 10, "mtime_ns": 100, "status": "uploaded"}
+    def modified(stat):
+        return bool(base and base["status"] in {"present", "uploaded"} and base["size"] != stat.st_size and base["mtime_ns"] != stat.st_mtime_ns)
+    assert modified(SimpleNamespace(st_size=10, st_mtime_ns=101)) is False
+    assert modified(SimpleNamespace(st_size=11, st_mtime_ns=100)) is False
+    assert modified(SimpleNamespace(st_size=11, st_mtime_ns=101)) is True
+
+
+def test_partial_change_with_remote_same_name_keeps_old_baseline(tmp_path):
+    Plugin, _ = _load_plugin()
+    class Item:
+        def __init__(self, name, typ="file"):
+            self.name = name
+            self.type = typ
+    class Chain:
+        def get_file_item(self, storage, path):
+            return Item("A", "dir")
+        def list_files(self, folder, recursion=False):
+            return [Item("a.nfo")]
+    Plugin.scan_preview.__globals__["StorageChain"] = Chain
+    p = Plugin()
+    p._cache_enabled = True
+    p._mappings = f"{tmp_path}=/影视库/A"
+    p._extensions = ".nfo"
+    p._max_size_mb = 20
+    local = tmp_path / "a.nfo"
+    local.write_text("old", encoding="utf-8")
+    stat = local.stat()
+    key = p._cache_key(local, tmp_path, "/影视库/A")
+    old = {"size": stat.st_size, "mtime_ns": stat.st_mtime_ns, "checked_at": 1, "status": "uploaded"}
+    p.save_data("file_cache", {key: old.copy()})
+    import os
+    os.utime(local, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1000))
+    result = p.scan_preview()
+    assert result["pending"] == 0
+    saved = p.get_data("file_cache")[key]
+    assert saved["size"] == old["size"]
+    assert saved["mtime_ns"] == old["mtime_ns"]
+
+
+def test_both_size_and_mtime_change_creates_overwrite(tmp_path):
+    Plugin, _ = _load_plugin()
+    class Item:
+        def __init__(self, name, typ="file"):
+            self.name = name
+            self.type = typ
+    class Chain:
+        def get_file_item(self, storage, path):
+            return Item("A", "dir")
+        def list_files(self, folder, recursion=False):
+            return [Item("a.nfo")]
+    Plugin.scan_preview.__globals__["StorageChain"] = Chain
+    p = Plugin()
+    p._cache_enabled = True
+    p._mappings = f"{tmp_path}=/影视库/A"
+    p._extensions = ".nfo"
+    p._max_size_mb = 20
+    local = tmp_path / "a.nfo"
+    local.write_text("old", encoding="utf-8")
+    stat = local.stat()
+    key = p._cache_key(local, tmp_path, "/影视库/A")
+    p.save_data("file_cache", {key: {"size": stat.st_size, "mtime_ns": stat.st_mtime_ns, "checked_at": 1, "status": "uploaded"}})
+    local.write_text("new content", encoding="utf-8")
+    result = p.scan_preview()
+    assert result["pending"] == 1
+    plan = p.get_data("sync_plan")
+    assert plan["entries"][0]["action"] == "overwrite"
