@@ -22,7 +22,7 @@ class Metadata115Sync(_PluginBase):
     plugin_name = "Metadata115Sync"
     plugin_desc = "本地元数据单向同步到115，不使用TMDB。"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/u115.png"
-    plugin_version = "2.11.0"
+    plugin_version = "2.9.0"
     plugin_author = "shadow-puppetry"
     author_url = ""
     plugin_config_prefix = "metadata115sync_"
@@ -55,7 +55,6 @@ class Metadata115Sync(_PluginBase):
         "uploaded": 0,
         "skipped": 0,
         "failed": 0,
-        "updated": 0,
         "current_file": "",
         "current_dir": "",
         "message": "",
@@ -170,7 +169,6 @@ class Metadata115Sync(_PluginBase):
             f"115已有：{status['existing']}",
             f"待同步：{status['pending']}",
             f"已上传：{status['uploaded']}",
-            f"已更新：{status['updated']}",
             f"失败：{status['failed']}",
         ]
         if status.get("current_dir"):
@@ -467,15 +465,7 @@ class Metadata115Sync(_PluginBase):
                 if dedupe in seen:
                     continue
                 seen.add(dedupe)
-                cached_item = cache.get(key) if self._cache_enabled else None
-                # 只有相对上次确认基线的 size 与 mtime_ns 同时变化，才触发覆盖。
-                modified = bool(
-                    cached_item
-                    and cached_item.get("status") in {"present", "uploaded"}
-                    and int(cached_item.get("size", -1)) != int(stat.st_size)
-                    and int(cached_item.get("mtime_ns", -1)) != int(stat.st_mtime_ns)
-                )
-                candidates.append((local, stat, remote_dir, key, modified, cached_item))
+                candidates.append((local, stat, remote_dir, key))
                 if totals["scanned"] % 250 == 0:
                     self._set_progress(totals["scanned"], 0, state="扫描本地", current_file=str(local), current_dir=remote_dir, **totals, message="只扫描本地文件，尚未访问115")
         return candidates
@@ -487,7 +477,7 @@ class Metadata115Sync(_PluginBase):
             logger.error("Metadata115Sync：没有配置有效的目录映射")
             return {"status": "invalid_mapping"}
 
-        totals = {"scanned": 0, "existing": 0, "pending": 0, "uploaded": 0, "skipped": 0, "failed": 0, "updated": 0}
+        totals = {"scanned": 0, "existing": 0, "pending": 0, "uploaded": 0, "skipped": 0, "failed": 0}
         self._set_progress(0, 0, state="扫描本地", force=True, started_at=time.time(), **totals, message="开始扫描本地文件")
         logger.info("Metadata115Sync：开始扫描预览")
         excluded = self._exclude_paths()
@@ -519,36 +509,21 @@ class Metadata115Sync(_PluginBase):
             if not cache_used:
                 remote_api_dirs += 1
             # 远程目录缓存只对“存在”提供快速命中；缓存中缺失的文件必须刷新一次目录，避免6小时TTL导致误上传。
-            missing_in_cache = [local for local, _, _, _, _, _ in items if self._normalize_name(local.name) not in names]
+            missing_in_cache = [local for local, _, _, _ in items if self._normalize_name(local.name) not in names]
             if cache_used and missing_in_cache:
                 refreshed_names, _, refreshed_cached = self._remote_names(chain, remote_dir, remote_cache, refresh=True)
                 names = refreshed_names
                 if not refreshed_cached:
                     remote_api_dirs += 1
                 logger.info("Metadata115Sync：目录缓存未找到 %d 个文件，已强制刷新115目录：%s", len(missing_in_cache), remote_dir)
-            for local, stat, _, key, modified, cached_item in items:
+            for local, stat, _, key in items:
                 checked += 1
-                name = self._normalize_name(local.name)
-                if name in names:
-                    if modified:
-                        totals["pending"] += 1
-                        plan_entries.append({"path": str(local), "size": int(stat.st_size), "mtime_ns": int(stat.st_mtime_ns), "remote_dir": remote_dir, "cache_key": key, "action": "overwrite"})
-                        logger.info("Metadata115Sync：匹配到115同名文件，且本地 size 与 mtime_ns 均发生变化，准备覆盖：%s", local)
-                    else:
-                        totals["existing"] += 1
-                        if cached_item:
-                            size_changed = int(cached_item.get("size", -1)) != int(stat.st_size)
-                            mtime_changed = int(cached_item.get("mtime_ns", -1)) != int(stat.st_mtime_ns)
-                            if size_changed or mtime_changed:
-                                logger.info("Metadata115Sync：115已有同名文件，但本地 size 与 mtime_ns 未同时变化，跳过：%s", local)
-                            else:
-                                logger.debug("Metadata115Sync：本地缓存命中且115已有同名文件，跳过：%s", local)
-                        else:
-                            logger.info("Metadata115Sync：首次发现115已有同名文件，建立本地基线并跳过：%s", local)
-                            self._cache_mark(cache, key, stat, "present")
+                if self._normalize_name(local.name) in names:
+                    totals["existing"] += 1
+                    self._cache_mark(cache, key, stat, "present")
                 else:
                     totals["pending"] += 1
-                    plan_entries.append({"path": str(local), "size": int(stat.st_size), "mtime_ns": int(stat.st_mtime_ns), "remote_dir": remote_dir, "cache_key": key, "action": "upload"})
+                    plan_entries.append({"path": str(local), "size": int(stat.st_size), "mtime_ns": int(stat.st_mtime_ns), "remote_dir": remote_dir, "cache_key": key})
                 if checked % 50 == 0 or checked == total_work:
                     self._set_progress(checked, total_work, state="检查115", current_file=str(local), current_dir=remote_dir, **totals, message=f"检查115：{checked}/{total_work}；远程目录查询：{remote_api_dirs}")
 
@@ -591,32 +566,23 @@ class Metadata115Sync(_PluginBase):
         for remote_dir, items in dir_groups.items():
             if self._stop_event.is_set():
                 break
-            names, _, cache_used = self._remote_names(chain, remote_dir, remote_cache)
+            names, _, _ = self._remote_names(chain, remote_dir, remote_cache)
             # 远程目录缓存只对“存在”提供快速命中；缓存中缺失的文件必须刷新一次目录，避免6小时TTL导致误上传。
-            missing_in_cache = [local for local, _, _, _, _, _ in items if self._normalize_name(local.name) not in names]
+            missing_in_cache = [local for local, _, _, _ in items if self._normalize_name(local.name) not in names]
             if cache_used and missing_in_cache:
                 refreshed_names, _, refreshed_cached = self._remote_names(chain, remote_dir, remote_cache, refresh=True)
                 names = refreshed_names
+                if not refreshed_cached:
+                    remote_api_dirs += 1
                 logger.info("Metadata115Sync：目录缓存未找到 %d 个文件，已强制刷新115目录：%s", len(missing_in_cache), remote_dir)
-            for local, stat, _, key, modified, cached_item in items:
+            for local, stat, _, key in items:
                 checked += 1
-                name = self._normalize_name(local.name)
-                if name in names:
-                    if modified:
-                        totals["pending"] += 1
-                        entries.append({"path": str(local), "size": int(stat.st_size), "mtime_ns": int(stat.st_mtime_ns), "remote_dir": remote_dir, "cache_key": key, "action": "overwrite"})
-                    else:
-                        totals["existing"] += 1
-                        if cached_item:
-                            size_changed = int(cached_item.get("size", -1)) != int(stat.st_size)
-                            mtime_changed = int(cached_item.get("mtime_ns", -1)) != int(stat.st_mtime_ns)
-                            if size_changed or mtime_changed:
-                                logger.info("Metadata115Sync：115已有同名文件，但本地 size 与 mtime_ns 未同时变化，跳过：%s", local)
-                        else:
-                            self._cache_mark(cache, key, stat, "present")
+                if self._normalize_name(local.name) in names:
+                    totals["existing"] += 1
+                    self._cache_mark(cache, key, stat, "present")
                 else:
                     totals["pending"] += 1
-                    entries.append({"path": str(local), "size": int(stat.st_size), "mtime_ns": int(stat.st_mtime_ns), "remote_dir": remote_dir, "cache_key": key, "action": "upload"})
+                    entries.append({"path": str(local), "size": int(stat.st_size), "mtime_ns": int(stat.st_mtime_ns), "remote_dir": remote_dir, "cache_key": key})
                 if checked % 50 == 0:
                     self._set_progress(checked, len(candidates), state="检查115", current_file=str(local), current_dir=remote_dir, **totals, message=f"建立同步计划：{checked}/{len(candidates)}")
         if self._cache_enabled:
@@ -630,7 +596,7 @@ class Metadata115Sync(_PluginBase):
             return {"status": "already_running"}
         self._running = True
         self._stop_event.clear()
-        totals = {"scanned": 0, "existing": 0, "pending": 0, "uploaded": 0, "skipped": 0, "failed": 0, "updated": 0}
+        totals = {"scanned": 0, "existing": 0, "pending": 0, "uploaded": 0, "skipped": 0, "failed": 0}
         cache = self._load_cache()
         plan = self._load_plan()
         try:
@@ -675,15 +641,6 @@ class Metadata115Sync(_PluginBase):
                     return entry, False, "folder"
                 path = Path(entry["path"])
                 try:
-                    if entry.get("action") == "overwrite":
-                        remote_path = Path(entry["remote_dir"]) / path.name
-                        remote_item = chain.get_file_item("u115", remote_path)
-                        if remote_item:
-                            logger.info("Metadata115Sync：删除115旧版本，准备覆盖：%s", remote_path)
-                            if not chain.delete_file(remote_item):
-                                return entry, False, "delete_existing_failed"
-                        else:
-                            logger.info("Metadata115Sync：115旧文件已不存在，直接上传：%s", remote_path)
                     result = chain.upload_file(fileitem=folder, path=path, new_name=path.name)
                     return entry, bool(result), ""
                 except Exception as exc:
@@ -697,14 +654,10 @@ class Metadata115Sync(_PluginBase):
                     entry, ok, reason = future.result()
                     done += 1
                     if ok:
-                        if entry.get("action") == "overwrite":
-                            totals["updated"] += 1
-                            logger.info("Metadata115Sync：覆盖同步成功 %s", entry["path"])
-                        else:
-                            totals["uploaded"] += 1
-                            logger.info("Metadata115Sync：上传成功 %s", entry["path"])
+                        totals["uploaded"] += 1
                         stat = Path(entry["path"]).stat()
                         self._cache_mark(cache, entry["cache_key"], stat, "uploaded")
+                        logger.info("Metadata115Sync：上传成功 %s", entry["path"])
                     elif reason == "stopped":
                         logger.info("Metadata115Sync：收到停止请求，停止继续上传")
                         break
@@ -722,7 +675,7 @@ class Metadata115Sync(_PluginBase):
             if self._stop_event.is_set():
                 state, message = "已停止", f"同步已停止；成功上传 {totals['uploaded']} 个"
             else:
-                state, message = "同步完成", f"同步完成；新增 {totals['uploaded']} 个，覆盖更新 {totals['updated']} 个，失败 {totals['failed']} 个"
+                state, message = "同步完成", f"同步完成；成功上传 {totals['uploaded']} 个，失败 {totals['failed']} 个"
             self._set_progress(min(totals["uploaded"] + totals["failed"], total_upload), total_upload, state=state, current_file="", current_dir="", force=True, **totals, message=message)
             logger.info("Metadata115Sync：%s", message)
             return {"status": state, **totals}
